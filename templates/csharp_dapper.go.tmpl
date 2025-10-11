@@ -1,0 +1,407 @@
+{{- /* 
+https://docs.sqlc.dev/en/stable/reference/query-annotations.html
+https://github.com/sqlc-dev/sqlc/blob/main/protos/plugin/codegen.proto
+https://github.com/rusqlite/rusqlite
+https://pkg.go.dev/text/template
+*/ -}}
+
+{{- $CacheStatementsGlobal :=  "cache_statements" | getPluginOption -}}
+
+{{- $customTypes := dict }}
+{{- $tables := dict }}
+{{- $_ := setContext "customTypes" $customTypes }}
+{{- $defaultSchema := .Catalog.DefaultSchema}}
+{{- $_ := setContext "defaultSchema" $defaultSchema }}
+
+{{- define "CsharpType" -}}
+{{- $customTypes := getContext "customTypes" }}
+{{- $csharpType := .Type.Name -}}
+{{- $csharpType = regexReplace "pg_catalog\\." "" $csharpType }}
+{{- $type := $csharpType | toLower  -}}
+{{- if or (eq $type "int4") (eq $type "serial") (eq $type "integer")}}{{ $csharpType = "int" }}
+{{- else if eq $type "text"}}{{ $csharpType = "string" }}
+{{- else if eq $type "blob"}}{{ $csharpType = "byte[]" }}
+{{- else if eq $type "real"}}{{ $csharpType = "double" }}
+{{- else if eq $type "float"}}{{ $csharpType = "float" }}
+{{- else if eq $type "double"}}{{ $csharpType = "double" }}
+{{- else if eq $type "bool"}}{{ $csharpType = "bool" }}
+{{- else if eq $type "boolean"}}{{ $csharpType = "bool" }}
+{{- else if eq $type "date"}}{{ $csharpType = "DateTime" }}
+{{- else if eq $type "timestamp"}}{{ $csharpType = "DateTime" }}
+{{- else if eq $type "timestamptz"}}{{ $csharpType = "DateTimeOffset" }}
+{{- else if eq $type "json"}}{{ $csharpType = "string" }}
+{{- else if eq $type "uuid"}}{{ $csharpType = "Guid" }}
+{{- else if contains $type "varchar"}}{{ $csharpType = "string" }}
+{{- else }}
+  {{- if not (or (eq .Type.Schema (getContext "defaultSchema")) (empty .Type.Schema)) }}
+  {{- $csharpType = printf "%s_%s" .Type.Schema $csharpType }}
+  {{- end }}
+  {{- $type := $csharpType | toLower  -}}
+  {{- if hasKey $customTypes $type }}
+  {{- $csharpType = get $customTypes $type }}
+  {{- end -}}
+{{- end }}
+{{- $csharpType }}{{ if .IsArray }}[]{{ end }}{{ if not .NotNull }}?{{ end }}
+{{- end -}}
+
+{{- define "params" }}
+{{- $paramType := getContext "paramType" }}
+      {{- if not (empty $paramType) }}
+        {{ $paramType }} _params,
+      {{- else }}
+        {{- range $index, $_ := .Params }}
+        {{ template "CsharpType" .Column }} {{ (snakeToCamelCase .Column.Name) }},
+        {{- end -}}
+      {{- end }}
+        CancellationToken cancellationToken = default
+    )
+    {
+        var parameters = new DynamicParameters();
+        {{- if (gt (len .Params) 2) }}
+          {{- range $index, $_ := .Params }}
+        parameters.Add("@{{ .Column.Name }}", _params.{{ (snakeToCamelCase .Column.Name | toPascalCase) }});
+          {{- end }}
+        {{- else }}
+          {{- range $index, $_ := .Params }}
+        parameters.Add("@{{ .Column.Name }}", {{ (snakeToCamelCase .Column.Name) }});
+          {{- end }}
+        {{- end}}
+{{- end -}}
+
+/* This file is generated
+  This template supports the following plugin options from sqlc.yaml
+    namespace: the name of the namespace
+*/
+{{- $CacheStatements := false }}
+using Dapper;
+using Npgsql;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace {{ getPluginOption "namespace" }};
+
+// ---------- Models ----------
+{{- range .Catalog.Schemas }}
+{{- if or (or (eq .Name "pg_temp") (eq .Name "pg_catalog")) (eq .Name "information_schema")}}
+{{- else }}
+
+// Schema: {{ .Name }}
+{{- $prefix := "" }}
+{{- if not (eq .Name $defaultSchema) }}
+{{- $prefix = printf "%s_" .Name }}
+{{- end -}}
+
+{{- range .CompositeTypes }}
+{{- $sqlName := printf "%s%s" $prefix .Name }}
+{{- $name := $sqlName | snakeToCamelCase | toPascalCase}}
+{{- $_ := set $customTypes $sqlName $name }}
+// TODO: generate composite types when sqlc supports them, for now you have to create the type yourself
+// public class {{ $name }}
+{{- end -}}
+
+{{- range .Enums }}
+{{- $sqlName := printf "%s%s" $prefix .Name }}
+{{- $name := $sqlName | snakeToCamelCase | toPascalCase}}
+{{- $_ := set $customTypes $sqlName $name }}
+
+public enum {{ $name }}
+{
+{{- range .Vals}}
+    {{ toPascalCase . }},
+{{- end }}
+}
+{{- end }}
+
+{{- range .Tables }}
+{{- $sqlName := printf "%s%s" $prefix .Rel.Name }}
+{{- $name := $sqlName | snakeToCamelCase | toPascalCase}}
+{{- $_ := set $customTypes $sqlName $name }}
+{{- $_ := set $tables $sqlName . }}
+
+public class {{ $name }}
+{
+{{- range .Columns}}
+    public required {{ template "CsharpType" . }} {{ toPascalCase .Name }} { get; init; }
+{{- end }}
+}
+
+{{- end }}
+{{- end }}
+{{- end }}
+
+
+// ---------- Queries ----------
+
+public partial class BaseQueries
+{
+    protected BaseQueries(string connectionString, NpgsqlTransaction? transaction)
+    {
+        this.connectionString = connectionString;
+        Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
+    }
+
+    protected string connectionString;
+    protected NpgsqlTransaction? transaction;
+
+    protected async Task<T> queryScalarAsync<T>(
+        string query,
+        DynamicParameters parameters,
+        CancellationToken cancellationToken
+    ) {
+        if (transaction != null)
+        {
+            return await transaction.Connection.ExecuteScalarAsync<T>(
+                    new CommandDefinition(
+                        query,
+                        parameters,
+                        transaction: transaction,
+                        cancellationToken: cancellationToken
+                        )
+                    );
+        }
+
+        using var connection = new NpgsqlConnection(connectionString);
+        return await connection.ExecuteScalarAsync<T>(
+                new CommandDefinition(
+                    query,
+                    parameters,
+                    cancellationToken: cancellationToken
+                    )
+                );
+    }
+
+    protected async Task<T?> queryOneAsync<T>(
+        string query,
+        DynamicParameters parameters,
+        CancellationToken cancellationToken
+    ) {
+        if (transaction != null)
+        {
+            return await transaction.Connection.QueryFirstOrDefaultAsync<T>(
+                    new CommandDefinition(
+                        query,
+                        parameters,
+                        transaction: transaction,
+                        cancellationToken: cancellationToken
+                        )
+                    );
+        }
+
+        using var connection = new NpgsqlConnection(connectionString);
+        return await connection.QueryFirstOrDefaultAsync<T>(
+                new CommandDefinition(
+                    query,
+                    parameters,
+                    cancellationToken: cancellationToken
+                    )
+                );
+    }
+
+    protected async Task<IEnumerable<T>> queryManyAsync<T>(
+        string query,
+        DynamicParameters parameters,
+        CancellationToken cancellationToken
+    ) {
+        if (transaction != null)
+        {
+            return await transaction.Connection.QueryAsync<T>(
+                new CommandDefinition(
+                    query,
+                    parameters,
+                    transaction: transaction,
+                    cancellationToken: cancellationToken
+                    )
+                );
+        }
+
+        using var connection = new NpgsqlConnection(connectionString);
+        return await connection.QueryAsync<T>(
+                new CommandDefinition(
+                    query,
+                    parameters,
+                    cancellationToken: cancellationToken
+                    )
+                );
+      }
+
+    protected async Task<int> queryExecAsync(
+        string query,
+        DynamicParameters parameters,
+        CancellationToken cancellationToken
+    ) {
+        if (transaction != null)
+        {
+            return await transaction.Connection.ExecuteAsync(
+                    new CommandDefinition(
+                        query,
+                        parameters,
+                        transaction: transaction,
+                        cancellationToken: cancellationToken
+                        )
+                    );
+        }
+
+        using var connection = new NpgsqlConnection(connectionString);
+        return await connection.ExecuteAsync(
+                new CommandDefinition(
+                    query,
+                    parameters,
+                    cancellationToken: cancellationToken
+                    )
+                );
+    }
+}
+
+public class Queries : BaseQueries
+{
+    public Queries(string connectionString) : base(connectionString, null) { }
+
+    public TransactionalQueries BeginTransaction()
+    {
+        var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            var transaction = connection.BeginTransaction();
+        }
+        catch
+        {
+            connection.Dispose();
+        }
+        return new TransactionalQueries(transaction);
+    }
+}
+
+public class TransactionalQueries : BaseQueries, IDisposable
+{
+    internal TransactionalQueries(NpgsqlTransaction transaction) : base("", transaction)
+    {
+        this.connection = transaction.Connection;
+        Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
+    }
+
+    private NpgsqlConnection connection;
+
+    public Task CommitAsync(CancellationToken cancellationToken = default) 
+    {
+        return transaction.CommitAsync(cancellationToken);
+    }
+
+    public void Dispose()
+    {
+        transaction?.Dispose();
+        connection?.Dispose();
+    }
+}
+
+{{- range .Queries }}
+
+// {{ .Filename }} -- name: {{ .Name }} {{ .Cmd }}
+
+{{- range .Comments }}// {{.}}
+{{- end }}
+
+{{- $rowType := "" }}
+{{- if and (or (eq .Cmd ":many") (eq .Cmd ":one")) (gt (len .Columns) 1) }}
+{{- $rowType = printf "%sRow" (toPascalCase .Name) }}
+{{- $table := (index .Columns 0).Table}}
+{{- $allOfTable := false }}
+{{- if not (empty $table) }}
+  {{- $allOfTable = true }}
+  {{- range .Columns }}
+    {{- if eq .Table nil }}
+      {{- $allOfTable = false }}
+    {{- else if not (and (eq $table.Name .Table.Name) (eq $table.Schema .Table.Schema)) }}
+      {{- $allOfTable = false }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- $prefix := "" }}
+{{- if and (not (eq $table.Schema $defaultSchema)) (not (empty $table.Schema)) }}
+{{- $prefix = printf "%s_" $table.Schema }}
+{{- end }}
+{{- $tableName := printf "%s%s" $prefix $table.Name }}
+{{- if and $allOfTable (eq (len (get $tables $tableName).Columns) (len .Columns)) }}
+{{- $rowType = get $customTypes $tableName }}
+{{- else }}
+
+public class {{ $rowType }}
+{
+{{- range .Columns}}
+    public required {{ template "CsharpType" . }} {{ toPascalCase .Name }} { get; init; }
+{{- end }}
+}
+
+{{- end }}
+{{- else if gt (len .Columns) 0 }}
+{{- $rowType = templateIntoString "CsharpType" (index .Columns 0)}}
+{{- end }}
+
+
+{{- $paramType := "" }}
+{{- if (gt (len .Params) 2) }}
+{{- $paramType = printf "%sParams" (toPascalCase .Name) }}
+
+public class {{ $paramType }}
+{
+  {{- range .Params}}
+    public required {{ template "CsharpType" .Column }} {{ toPascalCase .Column.Name }} { get; init; }
+  {{- end }}
+}
+{{- end }}
+{{- $_ := setContext "paramType" $paramType}}
+
+
+{{- $sqlName := printf "_%sSql"  .Name }}
+
+{{- $transformedSql := .Text }}
+{{- range .Params }}
+{{- $transformedSql =  regexReplace (printf "\\$%d" .Number) (printf "@%s" .Column.Name) $transformedSql }}
+{{- end }}
+
+public partial class BaseQueries
+{
+    private const string {{ $sqlName }} = """
+    {{- $transformedSql | nindent 8 }}
+        """;
+{{ if eq .Cmd ":many" -}}
+{{- $returnType := printf "Task<IEnumerable<%s>>" $rowType }}
+    public {{ $returnType }} {{ toPascalCase .Name  }}(
+        {{- template "params" . }}
+
+        return queryManyAsync<{{ $rowType }}>({{ $sqlName }}, parameters, cancellationToken);
+    }
+{{- end }}
+
+
+{{- if eq .Cmd ":one" }}
+{{- $returnType := printf "Task<%s?>" $rowType }}
+    public {{ $returnType }} {{ toPascalCase .Name  }}(
+        {{- template "params" . }}
+        {{""}}
+        {{- if eq (len .Columns) 1 }}
+        return queryScalarAsync<{{ $rowType }}?>({{ $sqlName }}, parameters, cancellationToken);
+        {{- else }}
+        return queryOneAsync<{{ $rowType }}>({{ $sqlName }}, parameters, cancellationToken);
+        {{- end }}
+    }
+{{- end -}}
+
+{{- if eq .Cmd ":exec" }}
+{{- $lastIndex := (sub (len .Params) 1) }}
+    public Task<int> {{ toPascalCase .Name  }}(
+      {{- template "params" . }}
+
+        return queryExecAsync({{ $sqlName }}, parameters, cancellationToken);
+    }
+{{- end -}}
+
+{{- if eq .Cmd ":copyfrom" }}
+// TODO: :copyfrom is not supported yet
+{{- end }}
+{{""}}
+}
+
+{{- end -}}

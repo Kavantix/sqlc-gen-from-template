@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
-	"path/filepath"
 
 	"github.com/sqlc-dev/plugin-sdk-go/codegen"
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
@@ -50,14 +51,16 @@ func generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		log.Fatal("failed to unmarshal plugin options: ", err)
 	}
 
+	var tmpl *template.Template
+	tmplContext := map[string]any{}
 	funcMap := template.FuncMap{
-		"Contains": strings.Contains,
+		"contains": strings.Contains,
 		// https://stackoverflow.com/a/18276968/1149933
-		"Dict": func(values ...interface{}) (map[string]interface{}, error) {
+		"dict": func(values ...any) (map[string]any, error) {
 			if len(values)%2 != 0 {
 				return nil, errors.New("invalid dict call")
 			}
-			dict := make(map[string]interface{}, len(values)/2)
+			dict := make(map[string]any, len(values)/2)
 			for i := 0; i < len(values); i += 2 {
 				key, ok := values[i].(string)
 				if !ok {
@@ -67,15 +70,113 @@ func generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 			}
 			return dict, nil
 		},
-		"GetPluginOption": func(name string) any {
+		"set": func(dict map[string]any, key string, value any) map[string]any {
+			dict[key] = value
+			return dict
+		},
+		"get": func(dict map[string]any, key string) (any, error) {
+			val, ok := dict[key]
+			if !ok {
+				return nil, fmt.Errorf("no value for key %s", key)
+			}
+			return val, nil
+		},
+		"empty": func(value any) bool {
+			return value == "" || value == 0 || value == nil
+		},
+		"setContext": func(key string, value any) map[string]any {
+			tmplContext[key] = value
+			return tmplContext
+		},
+		"hasKey": func(dict map[string]any, key string) bool {
+			_, ok := dict[key]
+			return ok
+		},
+		"getContext": func(key string) any {
+			return tmplContext[key]
+		},
+		"hasContextKey": func(key string) bool {
+			_, ok := tmplContext[key]
+			return ok
+		},
+		"getPluginOption": func(name string) any {
 			option, ok := pluginOptions[name]
 			if !ok {
 				return ""
 			}
 			return option
 		},
-		"Split":   strings.Split,
-		"ToLower": strings.ToLower,
+		"split":   strings.Split,
+		"toLower": strings.ToLower,
+		"toUpper": strings.ToUpper,
+		"add": func(a int, b int) int {
+			return a + b
+		},
+		"sub": func(a int, b int) int {
+			return a - b
+		},
+		"toPascalCase": func(s string) string {
+			buffer := strings.Builder{}
+			for i := 0; i < len(s); i++ {
+				char := s[i]
+				if i == 0 {
+					if 'a' <= char && char <= 'z' {
+						char -= 'a' - 'A'
+					}
+
+				}
+				if char != '_' {
+					buffer.WriteByte(char)
+					continue
+				}
+				i += 1
+				if i >= len(s) {
+					break
+				}
+				char = s[i]
+				if 'a' <= char && char <= 'z' {
+					char -= 'a' - 'A'
+				}
+				buffer.WriteByte(char)
+			}
+			return buffer.String()
+		},
+		"snakeToCamelCase": func(s string) string {
+			buffer := strings.Builder{}
+			for i := 0; i < len(s); i++ {
+				char := s[i]
+				if char != '_' {
+					buffer.WriteByte(char)
+					continue
+				}
+				i += 1
+				if i >= len(s) {
+					break
+				}
+				char = s[i]
+				if 'a' <= char && char <= 'z' {
+					char -= 'a' - 'A'
+				}
+				buffer.WriteByte(char)
+			}
+			return buffer.String()
+		},
+		"templateIntoString": func(name string, data any) string {
+			buffer := strings.Builder{}
+			tmpl.ExecuteTemplate(&buffer, name, data)
+			return buffer.String()
+		},
+		"nindent": func(count int, value string) string {
+			indentation := "\n" + strings.Repeat(" ", count)
+			return indentation + strings.ReplaceAll(value, "\n", indentation)
+		},
+		"regexReplace": func(expr string, replacement string, src string) (string, error) {
+			regex, err := regexp.Compile(expr)
+			if err != nil {
+				return "", err
+			}
+			return regex.ReplaceAllLiteralString(src, replacement), nil
+		},
 	}
 
 	absPath, err := filepath.Abs(templateFileName)
@@ -83,7 +184,7 @@ func generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		log.Fatalf("Failed to resolve absolute path for template: %v", err)
 	}
 
-	tmpl, err := template.New(filepath.Base(absPath)).Funcs(funcMap).ParseFiles(absPath)
+	tmpl, err = template.New(filepath.Base(absPath)).Funcs(funcMap).ParseFiles(absPath)
 	if err != nil {
 		log.Fatalf("Error parsing template file: %v", err)
 	}
