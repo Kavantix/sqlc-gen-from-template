@@ -5,9 +5,8 @@ https://github.com/rusqlite/rusqlite
 https://pkg.go.dev/text/template
 */ -}}
 
-{{- $CacheStatementsGlobal :=  "cache_statements" | getPluginOption -}}
-
 {{- $customTypes := dict }}
+{{- $enums := dict }}
 {{- $tables := dict }}
 {{- $_ := setContext "customTypes" $customTypes }}
 {{- $defaultSchema := .Catalog.DefaultSchema}}
@@ -53,17 +52,17 @@ https://pkg.go.dev/text/template
         {{ template "CsharpType" .Column }} {{ (snakeToCamelCase .Column.Name) }},
         {{- end -}}
       {{- end }}
-        CancellationToken cancellationToken = default
-    )
-    {
-        var parameters = new DynamicParameters();
+{{- end -}}
+{{- define "cmdParams" }}
         {{- if (gt (len .Params) 2) }}
           {{- range $index, $_ := .Params }}
-        parameters.Add("@{{ .Column.Name }}", _params.{{ (snakeToCamelCase .Column.Name | toPascalCase) }});
+        command.Parameters.AddWithValue("@{{ .Column.Name }}", _params.{{ (snakeToCamelCase .Column.Name | toPascalCase) }}
+        {{- if not .Column.NotNull}} ?? (object)DBNull.Value {{- end }});
           {{- end }}
         {{- else }}
           {{- range $index, $_ := .Params }}
-        parameters.Add("@{{ .Column.Name }}", {{ (snakeToCamelCase .Column.Name) }});
+        command.Parameters.AddWithValue("@{{ .Column.Name }}", {{ (snakeToCamelCase .Column.Name) }}
+        {{- if not .Column.NotNull}} ?? (object)DBNull.Value {{- end }});
           {{- end }}
         {{- end}}
 {{- end -}}
@@ -73,13 +72,10 @@ https://pkg.go.dev/text/template
     namespace: the name of the namespace
 */
 {{- $CacheStatements := false }}
-using Dapper;
 using Npgsql;
-using System;
-using System.Collections.Generic;
-using System.Data;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace {{ getPluginOption "namespace" }};
 
@@ -106,7 +102,9 @@ namespace {{ getPluginOption "namespace" }};
 {{- $sqlName := printf "%s%s" $prefix .Name }}
 {{- $name := $sqlName | snakeToCamelCase | toPascalCase}}
 {{- $_ := set $customTypes $sqlName $name }}
+{{- $_ := set $enums $sqlName $name }}
 
+[JsonConverter(typeof(SnakeCassJsonStringEnumConverter<{{ $name }}>))]
 public enum {{ $name }}
 {
 {{- range .Vals}}
@@ -124,7 +122,7 @@ public enum {{ $name }}
 public class {{ $name }}
 {
 {{- range .Columns}}
-    public required {{ template "CsharpType" . }} {{ toPascalCase .Name }} { get; init; }
+    public {{- if .NotNull}} required{{- end }} {{ template "CsharpType" . }} {{ toPascalCase .Name }} { get; init; }
 {{- end }}
 }
 
@@ -134,167 +132,6 @@ public class {{ $name }}
 
 
 // ---------- Queries ----------
-
-public partial class BaseQueries
-{
-    protected BaseQueries(string connectionString, NpgsqlTransaction? transaction)
-    {
-        this.connectionString = connectionString;
-        Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
-    }
-
-    protected string connectionString;
-    protected NpgsqlTransaction? transaction;
-
-    protected async Task<T> queryScalarAsync<T>(
-        string query,
-        DynamicParameters parameters,
-        CancellationToken cancellationToken
-    ) {
-        if (transaction != null)
-        {
-            return await transaction.Connection.ExecuteScalarAsync<T>(
-                    new CommandDefinition(
-                        query,
-                        parameters,
-                        transaction: transaction,
-                        cancellationToken: cancellationToken
-                        )
-                    );
-        }
-
-        using var connection = new NpgsqlConnection(connectionString);
-        return await connection.ExecuteScalarAsync<T>(
-                new CommandDefinition(
-                    query,
-                    parameters,
-                    cancellationToken: cancellationToken
-                    )
-                );
-    }
-
-    protected async Task<T?> queryOneAsync<T>(
-        string query,
-        DynamicParameters parameters,
-        CancellationToken cancellationToken
-    ) {
-        if (transaction != null)
-        {
-            return await transaction.Connection.QueryFirstOrDefaultAsync<T>(
-                    new CommandDefinition(
-                        query,
-                        parameters,
-                        transaction: transaction,
-                        cancellationToken: cancellationToken
-                        )
-                    );
-        }
-
-        using var connection = new NpgsqlConnection(connectionString);
-        return await connection.QueryFirstOrDefaultAsync<T>(
-                new CommandDefinition(
-                    query,
-                    parameters,
-                    cancellationToken: cancellationToken
-                    )
-                );
-    }
-
-    protected async Task<IEnumerable<T>> queryManyAsync<T>(
-        string query,
-        DynamicParameters parameters,
-        CancellationToken cancellationToken
-    ) {
-        if (transaction != null)
-        {
-            return await transaction.Connection.QueryAsync<T>(
-                new CommandDefinition(
-                    query,
-                    parameters,
-                    transaction: transaction,
-                    cancellationToken: cancellationToken
-                    )
-                );
-        }
-
-        using var connection = new NpgsqlConnection(connectionString);
-        return await connection.QueryAsync<T>(
-                new CommandDefinition(
-                    query,
-                    parameters,
-                    cancellationToken: cancellationToken
-                    )
-                );
-      }
-
-    protected async Task<int> queryExecAsync(
-        string query,
-        DynamicParameters parameters,
-        CancellationToken cancellationToken
-    ) {
-        if (transaction != null)
-        {
-            return await transaction.Connection.ExecuteAsync(
-                    new CommandDefinition(
-                        query,
-                        parameters,
-                        transaction: transaction,
-                        cancellationToken: cancellationToken
-                        )
-                    );
-        }
-
-        using var connection = new NpgsqlConnection(connectionString);
-        return await connection.ExecuteAsync(
-                new CommandDefinition(
-                    query,
-                    parameters,
-                    cancellationToken: cancellationToken
-                    )
-                );
-    }
-}
-
-public class Queries : BaseQueries
-{
-    public Queries(string connectionString) : base(connectionString, null) { }
-
-    public TransactionalQueries BeginTransaction()
-    {
-        var connection = new NpgsqlConnection(connectionString);
-        try
-        {
-            var transaction = connection.BeginTransaction();
-        }
-        catch
-        {
-            connection.Dispose();
-        }
-        return new TransactionalQueries(transaction);
-    }
-}
-
-public class TransactionalQueries : BaseQueries, IDisposable
-{
-    internal TransactionalQueries(NpgsqlTransaction transaction) : base("", transaction)
-    {
-        this.connection = transaction.Connection;
-        Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
-    }
-
-    private NpgsqlConnection connection;
-
-    public Task CommitAsync(CancellationToken cancellationToken = default) 
-    {
-        return transaction.CommitAsync(cancellationToken);
-    }
-
-    public void Dispose()
-    {
-        transaction?.Dispose();
-        connection?.Dispose();
-    }
-}
 
 {{- range .Queries }}
 
@@ -330,7 +167,7 @@ public class TransactionalQueries : BaseQueries, IDisposable
 public class {{ $rowType }}
 {
 {{- range .Columns}}
-    public required {{ template "CsharpType" . }} {{ toPascalCase .Name }} { get; init; }
+    public {{- if .NotNull}} required{{- end }} {{ template "CsharpType" . }} {{ toPascalCase .Name }} { get; init; }
 {{- end }}
 }
 
@@ -347,7 +184,7 @@ public class {{ $rowType }}
 public class {{ $paramType }}
 {
   {{- range .Params}}
-    public required {{ template "CsharpType" .Column }} {{ toPascalCase .Column.Name }} { get; init; }
+    public {{- if .Column.NotNull}} required{{- end }} {{ template "CsharpType" .Column }} {{ toPascalCase .Column.Name }} { get; init; }
   {{- end }}
 }
 {{- end }}
@@ -361,40 +198,85 @@ public class {{ $paramType }}
 {{- $transformedSql =  regexReplace (printf "\\$%d" .Number) (printf "@%s" .Column.Name) $transformedSql }}
 {{- end }}
 
-public partial class BaseQueries
+public abstract partial class BaseQueries
 {
     private const string {{ $sqlName }} = """
     {{- $transformedSql | nindent 8 }}
         """;
 {{ if eq .Cmd ":many" -}}
-{{- $returnType := printf "Task<IEnumerable<%s>>" $rowType }}
-    public {{ $returnType }} {{ toPascalCase .Name  }}(
+{{- $returnType := printf "IAsyncEnumerable<%s>" $rowType }}
+    public async {{ $returnType }} {{ toPascalCase .Name  }}(
         {{- template "params" . }}
-
-        return queryManyAsync<{{ $rowType }}>({{ $sqlName }}, parameters, cancellationToken);
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        await using var command = CreateCommand({{ $sqlName }});
+        {{- template "cmdParams" . }}
+        using (var reader = await command.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                yield return new {{ $rowType }}
+                {
+                  {{- range $i, $_ := .Columns }}
+                    {{ toPascalCase .Name }} =
+                    {{- if .NotNull -}}
+                    {{""}} reader.GetFieldValue<{{ template "CsharpType" . }}>({{ $i }}),
+                    {{- else -}}
+                    {{""}} reader.IsDBNull({{ $i }}) ? null : reader.GetFieldValue<{{ template "CsharpType" . }}>({{ $i }}),
+                    {{- end }}
+                  {{- end }}
+                };
+            }
+        }
     }
 {{- end }}
 
 
 {{- if eq .Cmd ":one" }}
 {{- $returnType := printf "Task<%s?>" $rowType }}
-    public {{ $returnType }} {{ toPascalCase .Name  }}(
+    public async {{ $returnType }} {{ toPascalCase .Name  }}(
         {{- template "params" . }}
-        {{""}}
+        CancellationToken cancellationToken = default
+    )
+    {
+        await using var command = CreateCommand({{ $sqlName }});
+        {{- template "cmdParams" . }}
         {{- if eq (len .Columns) 1 }}
-        return queryScalarAsync<{{ $rowType }}?>({{ $sqlName }}, parameters, cancellationToken);
+        return ({{ $rowType }}?)await command.ExecuteScalarAsync(cancellationToken);
         {{- else }}
-        return queryOneAsync<{{ $rowType }}>({{ $sqlName }}, parameters, cancellationToken);
+        using (var reader = await command.ExecuteReaderAsync())
+        {
+            if (await reader.ReadAsync())
+            {
+                return new {{ $rowType }}
+                {
+                  {{- range $i, $_ := .Columns }}
+                    {{ toPascalCase .Name }} =
+                    {{- if .NotNull -}}
+                    {{""}} reader.GetFieldValue<{{ template "CsharpType" . }}>({{ $i }}),
+                    {{- else -}}
+                    {{""}} reader.IsDBNull({{ $i }}) ? null : reader.GetFieldValue<{{ template "CsharpType" . }}>({{ $i }}),
+                    {{- end }}
+                  {{- end }}
+                };
+            }
+            return null;
+        }
         {{- end }}
     }
 {{- end -}}
 
 {{- if eq .Cmd ":exec" }}
 {{- $lastIndex := (sub (len .Params) 1) }}
-    public Task<int> {{ toPascalCase .Name  }}(
-      {{- template "params" . }}
-
-        return queryExecAsync({{ $sqlName }}, parameters, cancellationToken);
+    public async Task<int> {{ toPascalCase .Name  }}(
+        {{- template "params" . }}
+        CancellationToken cancellationToken = default
+    )
+    {
+        await using var command = CreateCommand({{ $sqlName }});
+        {{- template "cmdParams" . }}
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 {{- end -}}
 
@@ -403,5 +285,78 @@ public partial class BaseQueries
 {{- end }}
 {{""}}
 }
+{{- end }}
 
-{{- end -}}
+// ---------- Base ----------
+
+public static class QueriesServiceCollectionExtension
+{
+    public static IServiceCollection AddQueries(this IServiceCollection services, string connectionString)
+    {
+        var dataSource = Queries.CreateDataSource(connectionString);
+        return services.AddSingleton(new Queries(dataSource));
+    }
+}
+
+public abstract partial class BaseQueries
+{
+    protected abstract NpgsqlCommand CreateCommand(string sql);
+}
+
+public class Queries(NpgsqlDataSource dataSource) : BaseQueries
+{
+    public static NpgsqlDataSource CreateDataSource(string connectionString)
+    {
+        var builder = new NpgsqlDataSourceBuilder(connectionString)
+            {{- range $sqlName, $name := $enums }}
+            .MapEnum<{{ $name }}>("{{ $sqlName }}")
+            {{- end }}
+        ;
+        return builder.Build();
+    }
+
+    public async Task<TransactionalQueries> BeginTransaction()
+    {
+        using var connection = await dataSource.OpenConnectionAsync();
+        try
+        {
+            var transaction = connection.BeginTransaction();
+            return new TransactionalQueries(transaction);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    protected override NpgsqlCommand CreateCommand(string sql)
+    {
+        return dataSource.CreateCommand(sql);
+    }
+}
+
+public class TransactionalQueries(NpgsqlTransaction transaction) : BaseQueries, IDisposable
+{
+    protected override NpgsqlCommand CreateCommand(string sql)
+    {
+        return new NpgsqlCommand("...", transaction.Connection!, transaction);
+    }
+
+    public Task CommitAsync(CancellationToken cancellationToken = default)
+    {
+        return transaction.CommitAsync(cancellationToken);
+    }
+
+    public void Dispose()
+    {
+        var connection = transaction.Connection;
+        transaction?.Dispose();
+        connection?.Dispose();
+    }
+}
+
+class SnakeCassJsonStringEnumConverter<T> : JsonStringEnumConverter<T> where T : struct, Enum
+{
+    public SnakeCassJsonStringEnumConverter() : base(JsonNamingPolicy.SnakeCaseLower, true) { }
+}
