@@ -23,6 +23,7 @@ func main() {
 
 type Options struct {
 	Template         string `json:"template" yaml:"template"`
+	TemplateContent  string `json:"template_content" yaml:"template_content"`
 	Filename         string `json:"filename" yaml:"filename"`
 	FormatterCommand string `json:"formatter_cmd" yaml:"formatter_cmd"`
 	Out              string `json:"out" yaml:"out"`
@@ -184,7 +185,11 @@ func generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		log.Fatalf("Failed to resolve absolute path for template: %v", err)
 	}
 
-	tmpl, err = template.New(filepath.Base(absPath)).Funcs(funcMap).ParseFiles(absPath)
+	if options.TemplateContent != "" {
+		tmpl, err = template.New("__content").Funcs(funcMap).Parse(options.TemplateContent)
+	} else {
+		tmpl, err = template.New(filepath.Base(absPath)).Funcs(funcMap).ParseFiles(absPath)
+	}
 	if err != nil {
 		log.Fatalf("Error parsing template file: %v", err)
 	}
