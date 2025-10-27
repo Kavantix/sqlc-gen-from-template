@@ -345,7 +345,7 @@ public class TransactionalQueries(NpgsqlTransaction transaction) : BaseQueries, 
 {
     protected override NpgsqlCommand CreateCommand(string sql)
     {
-        return new NpgsqlCommand("...", transaction.Connection!, transaction);
+        return new NpgsqlCommand(sql, transaction.Connection!, transaction);
     }
 
     public Task CommitAsync(CancellationToken cancellationToken = default)
