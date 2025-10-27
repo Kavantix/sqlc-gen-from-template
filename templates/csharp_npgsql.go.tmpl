@@ -18,8 +18,9 @@ https://pkg.go.dev/text/template
 {{- $csharpType = regexReplace "pg_catalog\\." "" $csharpType }}
 {{- $type := $csharpType | toLower  -}}
 {{- if or (eq $type "int4") (eq $type "serial") (eq $type "integer")}}{{ $csharpType = "int" }}
+{{- else if eq $type "bigint"}}{{ $csharpType = "long" }}
 {{- else if eq $type "text"}}{{ $csharpType = "string" }}
-{{- else if eq $type "blob"}}{{ $csharpType = "byte[]" }}
+{{- else if or (eq $type "blob") (eq $type "bytea")}}{{ $csharpType = "byte[]" }}
 {{- else if eq $type "real"}}{{ $csharpType = "double" }}
 {{- else if eq $type "float"}}{{ $csharpType = "float" }}
 {{- else if eq $type "double"}}{{ $csharpType = "double" }}
@@ -76,6 +77,7 @@ using Npgsql;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace {{ getPluginOption "namespace" }};
 
@@ -145,7 +147,8 @@ public class {{ $name }}
 {{- $rowType = printf "%sRow" (toPascalCase .Name) }}
 {{- $table := (index .Columns 0).Table}}
 {{- $allOfTable := false }}
-{{- if not (empty $table) }}
+{{- $prefix := "" }}
+{{- if not (eq $table nil) }}
   {{- $allOfTable = true }}
   {{- range .Columns }}
     {{- if eq .Table nil }}
@@ -154,15 +157,17 @@ public class {{ $name }}
       {{- $allOfTable = false }}
     {{- end }}
   {{- end }}
+  {{- $tableName := printf "%s%s" $prefix $table.Name }}
+  {{- if and $allOfTable (eq (len (get $tables $tableName).Columns) (len .Columns)) }}
+    {{- if and (not (eq $table.Schema $defaultSchema)) (not (empty $table.Schema)) }}
+    {{- $prefix = printf "%s_" $table.Schema }}
+    {{- end }}
+    {{- $rowType = get $customTypes $tableName }}
+  {{- else }}
+    {{- $allOfTable = false }}
+  {{- end }}
 {{- end }}
-{{- $prefix := "" }}
-{{- if and (not (eq $table.Schema $defaultSchema)) (not (empty $table.Schema)) }}
-{{- $prefix = printf "%s_" $table.Schema }}
-{{- end }}
-{{- $tableName := printf "%s%s" $prefix $table.Name }}
-{{- if and $allOfTable (eq (len (get $tables $tableName).Columns) (len .Columns)) }}
-{{- $rowType = get $customTypes $tableName }}
-{{- else }}
+{{- if not $allOfTable }}
 
 public class {{ $rowType }}
 {
