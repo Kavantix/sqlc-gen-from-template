@@ -1,4 +1,4 @@
-{{- /* 
+{{- /*
 https://docs.sqlc.dev/en/stable/reference/query-annotations.html
 https://github.com/sqlc-dev/sqlc/blob/main/protos/plugin/codegen.proto
 https://github.com/rusqlite/rusqlite
@@ -47,7 +47,7 @@ https://pkg.go.dev/text/template
 {{- define "params" }}
 {{- $paramType := getContext "paramType" }}
       {{- if not (empty $paramType) }}
-        {{ $paramType }} _params,
+        {{ $paramType }} queryParams,
       {{- else }}
         {{- range $index, $_ := .Params }}
         {{ template "CsharpType" .Column }} {{ (snakeToCamelCase .Column.Name) }},
@@ -57,7 +57,7 @@ https://pkg.go.dev/text/template
 {{- define "cmdParams" }}
         {{- if (gt (len .Params) 2) }}
           {{- range $index, $_ := .Params }}
-        command.Parameters.AddWithValue("@{{ .Column.Name }}", _params.{{ (snakeToCamelCase .Column.Name | toPascalCase) }}
+        command.Parameters.AddWithValue("@{{ .Column.Name }}", queryParams.{{ (snakeToCamelCase .Column.Name | toPascalCase) }}
         {{- if not .Column.NotNull}} ?? (object)DBNull.Value {{- end }});
           {{- end }}
         {{- else }}
@@ -72,12 +72,16 @@ https://pkg.go.dev/text/template
   This template supports the following plugin options from sqlc.yaml
     namespace: the name of the namespace
 */
+
+#nullable enable
+
 {{- $CacheStatements := false }}
-using Npgsql;
+
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace {{ getPluginOption "namespace" }};
 
@@ -196,7 +200,7 @@ public class {{ $paramType }}
 {{- $_ := setContext "paramType" $paramType}}
 
 
-{{- $sqlName := printf "_%sSql"  .Name }}
+{{- $sqlName := printf "%sSql"  .Name }}
 
 {{- $transformedSql := .Text }}
 {{- range .Params }}
@@ -217,9 +221,9 @@ public abstract partial class BaseQueries
     {
         await using var command = CreateCommand({{ $sqlName }});
         {{- template "cmdParams" . }}
-        using (var reader = await command.ExecuteReaderAsync())
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(cancellationToken))
             {
                 yield return new {{ $rowType }}
                 {
@@ -250,9 +254,9 @@ public abstract partial class BaseQueries
         {{- if eq (len .Columns) 1 }}
         return ({{ $rowType }}?)await command.ExecuteScalarAsync(cancellationToken);
         {{- else }}
-        using (var reader = await command.ExecuteReaderAsync())
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            if (await reader.ReadAsync())
+            if (await reader.ReadAsync(cancellationToken))
             {
                 return new {{ $rowType }}
                 {
@@ -320,17 +324,17 @@ public class Queries(NpgsqlDataSource dataSource) : BaseQueries
         return builder.Build();
     }
 
-    public async Task<TransactionalQueries> BeginTransaction()
+    public async Task<TransactionalQueries> BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
-        using var connection = await dataSource.OpenConnectionAsync();
+        var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         try
         {
-            var transaction = connection.BeginTransaction();
+            var transaction = await connection.BeginTransactionAsync(cancellationToken);
             return new TransactionalQueries(transaction);
         }
         catch
         {
-            connection.Dispose();
+            await connection.DisposeAsync();
             throw;
         }
     }
@@ -355,8 +359,14 @@ public class TransactionalQueries(NpgsqlTransaction transaction) : BaseQueries, 
 
     public void Dispose()
     {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
         var connection = transaction.Connection;
-        transaction?.Dispose();
+        transaction.Dispose();
         connection?.Dispose();
     }
 }
